@@ -2597,3 +2597,139 @@ are otherwise independent — different goals, different audiences, different
 license-clean boundaries. This file (`VIS_sessions.md`) continues to track
 Wolf3D port work only; the synth log lives at `VIS_sessions_synth.md` in
 the vis-synth repo.
+
+---
+
+## Session 20 — A.24 perf: dirty-rect-column-narrowed A000 flush (2026-06-02)
+
+First session under Opus 4.8 (prior sessions were 4.7). Opened as a "gentle
+sweep" request: confirm the codebase is healthy, do incremental polish, and
+above all **look for a framerate win** (current verdict was "giocabile" since
+A.23.2).
+
+### Sweep verdict
+
+Codebase healthy, no rot. Single-file ~4700-LOC C with milestone-traceable
+headers, no FP in hot loops (fixed-point Q8.8/Q15/Q16 + LUTs throughout),
+and already-strong optimization discipline (half-column casts with WORD
+pair-writes, Q.16 sprite accumulators, direct-A000 flush, baked HUD).
+Polish/incremental confirmed as the right mode. No refactor needed.
+
+### The win (A.24)
+
+Mapped the per-frame hot path (Explore agent + targeted reads). The one
+clear, certain, zero-risk inefficiency: **FlushFramebufToA000 copied a full
+320-byte row for every dirty scanline**, ignoring the paint rect's
+horizontal extent. In normal play the dirty region is only the 128-px
+viewport at x=96 (InvalidatePlayerView marks exactly that rect), so ~60%
+of each viewport-row copy was wasted bandwidth (160 WORDs/row moved when
+only 64 carried changed pixels).
+
+Fix: the flush now clips to `[dx0, dx0+dw)` horizontally as well as
+`[dy0, dy0+dh)` vertically. WM_PAINT passes `rcPaint.left/right`; the boot
+full-screen flush passes the full width. src/dst share the same column
+offset (only the vertical axis flips for the bottom-up DIB). Always correct:
+HUD partial re-blits simply widen the GDI bounding box back out on the
+frames they occur.
+
+Expected: viewport-frame flush ~128 rows x 160 WORDs -> ~128 rows x 64
+WORDs (~2.5x less copy on the dominant frame type).
+
+### Scope decision (user-directed)
+
+Considered also re-surfacing the dormant `g_last_render_ms` PIT telemetry
+(measured every frame around DrawViewport, but its perf-bar paint was
+removed in A.21 due to a dirty-rect-merge freeze). User's call: **flush
+narrow ONLY this round** — the telemetry's own paint cost would pollute the
+judgment of the flush win, which is exactly why the user had it removed in
+past sessions. Telemetry deferred until/unless the flush proves
+insufficient and a real measurement is needed.
+
+### Result
+
+Single-iteration zero-fix. Build clean (the 8 W102 void*/handle-cast
+warnings are pre-existing, identical to A.23). WOLFA24.EXE 282,520 B
+(+32 B vs A.23 = the two extra clip params). wolfvis_a24.iso 1,579,008 B,
+WOLFA24.EXE staged into cd_root_a24 (staging trap avoided), SYSTEM.INI
+shell line updated to WOLFA24.EXE.
+
+**User verdict (honest):** "mi sembra che un lieve miglioramento ci sia!
+E' giocabilissimo (ma lo era anche prima, forse). Quindi sicuramente il fix
+serviva, a prescindere dal net gain effettivo." Baseline not fresh in memory
+(several days since last test), so the perceptual delta is modest/within
+noise — but the change is strictly better (free, correct, less bandwidth)
+so it stays. NOT a headline FPS jump like A.21's 2x; a clean incremental.
+
+Recon-first 19-for-19 (hot-path mapped before touching code).
+
+### Naming note (deferred action)
+
+User finalized a GitHub naming convention `[console]-[project]`; the repo
+`vs-sr-dev/vis-homebrew` should be renamed to **`vis-wolf3d`** for parity
+(alphabetical sort groups all console projects). Deferred to the next push:
+`gh repo rename vis-wolf3d` + update local remote (GitHub auto-redirects the
+old name). "homebrew" was the generic first-publish placeholder.
+
+## A.25 — Guard ammo drops (vanilla KillActor bo_clip2)
+
+Batched with A.24 for the same push. User-prioritized the ammo economy as
+the most "urgent" feature gap: the PoC had pickups (A.22) but guards left
+nothing on death, so the player ran dry mid-level — "si finiscono spesso le
+munizioni", whereas real Wolf3D keeps the pistol fed via corpse clips.
+
+### Recon (vanilla source, cloned at wolf3d/)
+
+- WL_STATE.C KillActor: guardobj/officerobj/mutantobj all call
+  `PlaceItemType(bo_clip2, tilex, tiley)` on death — drops on the corpse's
+  OWN tile (direct PlaceItemType, no DropItem free-spot search).
+- WL_AGENT.C GetBonus: bo_clip = `GiveAmmo(8)` (floor box, already
+  PK_AMMO_CLIP since A.22), bo_clip2 = `GiveAmmo(4)` (the corpse half-clip).
+  Both gate on `ammo == 99`.
+
+### Implementation (minimal, reuses A.22 pickup pipeline)
+
+- New `PK_AMMO_GUARD` kind = +4 ammo, gated at 99, GETAMMOSND chime.
+- `SpawnGuardDrop(x_q88, y_q88)`: appends a fresh pickup Object at the
+  guard's tile center, reusing PK_CLIP_SLOT (floor-clip sprite, loaded
+  since A.22 — no new VSWAP load), enemy_dir = NONE so AI ticker + painter
+  sort treat it as a static decoration. No-op if object table full or clip
+  sprite missing.
+- Hooked into DamageEnemy's lethal branch right after the death scream.
+- CheckPickups harvests it same-tile with ZERO new grab code (it already
+  scans any pickup_kind). Co-location with the corpse sprite is vanilla-
+  faithful.
+- RestartLevel re-runs ScanObjects (g_num_objects -> 0) so drops from a
+  prior life are wiped on respawn — no stale-clip accumulation.
+
+### Trap caught (1-iter)
+
+`g_num_static++` inside SpawnGuardDrop -> E1011 "g_num_static not declared":
+that counter is declared later in the file (only ScanObjects, downstream,
+uses it). Removed the increment — a runtime drop isn't part of the map's
+static census anyway, and the counter is diagnostic-only. Clean rebuild.
+
+### Result
+
+WOLFA25.EXE 282,792 B (+272 vs A.24), wolfvis_a25.iso 1,581,056 B. The 8
+W102 void*/handle-cast warnings are pre-existing. **User verdict: "Tutto
+ok! Sono riuscito ad andare molto più avanti di prima!"** — the ammo
+economy fix achieved its stated goal (deeper level progression). Recon-first
+20-for-20.
+
+### Concrete results (S20)
+
+- New: src/wolfvis_a24.c, src/wolfvis_a25.c.
+- New: src/build_wolfvis_a{24,25}.bat, src/link_wolfvis_a{24,25}.lnk,
+  src/mkiso_a{24,25}.py.
+- New: cd_root_a{24,25}/ (12 files each), build/WOLFA24.EXE (282,520 B),
+  build/WOLFA25.EXE (282,792 B), build/wolfvis_a{24,25}.iso (~1.58 MB).
+- Two milestones (A.24 perf + A.25 ammo drops), batched for one push.
+
+### Next-step candidates for S21
+
+- Push the A.24+A.25 batch + execute the deferred repo rename to
+  `vis-wolf3d`.
+- If more FPS is wanted: re-surface `g_last_render_ms` telemetry to MEASURE
+  whether render / flush / AI-tick dominates, then target the real
+  bottleneck (e.g. throttle AdvanceEnemies LOS DDA to every other tick).
+- Carried from S18: door SFX, L1 elevator/level-end, light-by-distance.

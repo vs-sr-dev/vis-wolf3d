@@ -1,6 +1,6 @@
-# VIS Homebrew
+# VIS — Wolfenstein 3D
 
-Homebrew development for the **Tandy/Memorex Video Information System (VIS)** — a 1992 multimedia console running Modular Windows 3.1 on an Intel 80286 @ 12 MHz, with a Yamaha YMF262 (OPL3) and a Mitsumi 1× CD-ROM.
+A homebrew **Wolfenstein 3D port** for the **Tandy/Memorex Video Information System (VIS)** — a 1992 multimedia console running Modular Windows 3.1 on an Intel 80286 @ 12 MHz, with a Yamaha YMF262 (OPL3) and a Mitsumi 1× CD-ROM.
 
 The headline goal of this repo is a **Wolfenstein 3D port** running natively as a Win16 NE on Modular Windows VIS, rendered via GDI palette blits, with OPL3 audio over direct port I/O and hand-controller input.
 
@@ -43,6 +43,8 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.20.1 — Combat fairness + damage flash polish | Hitchance softened from 256-dist*8 (vanilla "not visible") → 160-dist*16 (vanilla "visible") since `LOSCheck`-pass implies symmetric visibility = vanilla `FL_VISABLE` case where player has dodge window. Net: ~50% hit at dist=2 (was ~94%). Damage flash: 5-px red border (color 40 = HUD_FG_LOW) painted around viewport on first 2 of 3 ticks via `g_damage_flash_ticks` counter; final tick skips paint = clear-frame guarantee. WM_TIMER forces redraw while flash counter active so the sequence renders even on idle hit. User verdict: "fair (78/100 dopo due guardie)". wolfvis_a201.c baseline | ✅ |
 | A.22 — Pickups (medkit / clip / treasures / 1up) | 8 pickup kinds at obj_id 47..56 → VSWAP chunks 26-35: food (+10 hp), medkit (+25 hp), clip (+8 ammo), cross (+100), chalice (+500), bible (+1000), crown (+5000), 1up (+99 hp + 25 ammo). `Object.pickup_kind` BYTE field, `ScanObjects` pickup branch with `switch (obj)` for sparse mapping, `CheckPickups` same-tile proximity grab in WM_TIMER, `TryGiveBonus` with vanilla gates (hp==100 blocks health, ammo==99 blocks clip — pickup stays on floor). Removed pickups marked via `sprite_idx = -1` (DrawSpriteWorld + painter sort short-circuit on negative). **Trap caught**: `MAX_OBJECTS=128` overflow silently dropped guards in lower-y rows; bumped to 256, diagnosed via HUD-panel digit hijack (LEVEL/LIVES showing g_num_enemies/g_num_static at runtime). wolfvis_a22.c baseline | ✅ |
 | A.23 — AdLib SFX subsystem (8 trigger points) | OPL3 ch0 SFX driven by 140-Hz frequency-byte stream from AUDIOT.WL1 chunks 69..137 (vanilla AdLib bank). `LoadSfx(chunk_idx)` parses 23-byte header (length + priority + 16-byte instrument + block) + body data. `WriteSfxInstrument` writes 11 OPL registers per vanilla `SDL_AlSetFXInst` (modifier op = reg 0, carrier op = reg 3, alFeedCon = 0). `ServiceSfx` PIT-direct accumulator (`PIT_CYCLES_PER_SFX_TICK = 596400/140 = 4260`) consumes 1 freq byte per tick: `freq=0` = key off, else freqL + alBlock keyon. 8 trigger points wired (ATKPISTOL on FireWeapon, NAZIFIRE on ShootPlayer T_Shoot, HALT on WALK→SHOOT transition, DEATHSCREAM on lethal DamageEnemy, TAKEDAMAGE on DamagePlayer, GETAMMO/HEALTH/BONUS on TryGiveBonus). PeekMessage idle loop refactored: ServiceMusic + ServiceSfx after every Translate/Dispatch + ~14 mid-frame call sites (every 16 cols inside DrawViewport + post-render + mid-WM_TIMER) so accumulator never needs a cap (cap eats real time = "half speed", uncapped+sparse = bursty clicks; dense calls eliminate both). Bonus tool: `tools/dump_sfx.py` extracts AdLib chunks + renders via minimal pure-Python OPL2 emulator to WAV reference set in `tools/sfx_dump/`. **A.23.2 follow-up** bumped `MOVE_STEP_Q88` 24→64 (~2.7×) restoring vanilla RUN feel — was at exactly vanilla WALK speed (1.875 tile/sec) since A.6. User verdict: "Direi meglio ora!" + "Giocabilità molto migliorata" | ✅ |
+| A.24 — Per-frame flush narrowed to dirty-rect columns (perf polish) | `FlushFramebufToA000` (the A.21 RAM-framebuf → A000:0000 blit) now clips to the paint rect's **horizontal** extent too, not just vertical. In normal play the dirty rect is only the 128-px viewport at x=96, so each row now copies 64 WORDs instead of 160 (~2.5× less copy on the dominant frame type). New signature `(dx0, dw, dy0, dh)`; WM_PAINT passes `rcPaint.left/right`, boot full-screen flush passes the full width; src/dst share the column offset (only the vertical axis flips for the bottom-up DIB). Always correct — HUD partial re-blits widen the GDI bounding box back out on the frames they occur. Free, zero gameplay/visual change. User verdict: "lieve miglioramento, giocabilissimo — il fix serviva a prescindere dal net gain". wolfvis_a24.c baseline | ✅ |
+| A.25 — Guard ammo drops (vanilla `KillActor` `bo_clip2`) | Dying guards drop a half-clip on their corpse tile, mirroring vanilla `WL_STATE.C` `KillActor` → `PlaceItemType(bo_clip2, tilex, tiley)`. New `PK_AMMO_GUARD` pickup kind = +4 ammo (vanilla `GetBonus` `bo_clip2` = `GiveAmmo(4)`), gated at ammo == 99, GETAMMOSND chime. `SpawnGuardDrop` appends a runtime pickup `Object` at the guard's tile center reusing `PK_CLIP_SLOT` (the floor-clip sprite, already loaded since A.22 — no new VSWAP load), `enemy_dir = NONE` so the AI ticker + painter sort treat it as a static decoration; `CheckPickups` harvests it same-tile with zero new grab code. Closes the ammo economy the PoC was missing — without corpse drops the player ran dry mid-level. User verdict: "Tutto ok! Sono riuscito ad andare molto più avanti di prima!" wolfvis_a25.c baseline | ✅ |
 
 ## Repository layout
 
@@ -77,14 +79,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a23.bat"    # produces build/WOLFA23.EXE + stages it in cd_root_a23/
-python mkiso_a23.py                  # produces build/wolfvis_a23.iso
+cmd /c ".\build_wolfvis_a25.bat"    # produces build/WOLFA25.EXE + stages it in cd_root_a25/
+python mkiso_a25.py                  # produces build/wolfvis_a25.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a23.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a25.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)
