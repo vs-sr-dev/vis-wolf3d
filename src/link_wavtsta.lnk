@@ -1,0 +1,11 @@
+SYSTEM        windows
+NAME          ..\build\WAVTSTA.EXE
+FILE          ..\build\wavtsta.obj
+OPTION        MAP=..\build\WAVTSTA.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'A.26 Path A spike: DMA ch7 -> VIS DAC test'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
+IMPORT        DisplayDib     DISPDIB.DISPLAYDIB
+IMPORT        __A000H        KERNEL.__A000H

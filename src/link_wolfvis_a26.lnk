@@ -1,0 +1,11 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA26.EXE
+FILE          ..\build\wolfvis_a26.obj
+OPTION        MAP=..\build\WOLFA26.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.26 digitized voices via VIS PCM DAC (DMA ch7)'
+OPTION        STACK=6144
+OPTION        HEAPSIZE=2048
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
+IMPORT        DisplayDib     DISPDIB.DISPLAYDIB
+IMPORT        __A000H        KERNEL.__A000H

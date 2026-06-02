@@ -1,0 +1,13 @@
+SYSTEM        windows
+NAME          ..\build\WAVTEST.EXE
+FILE          ..\build\wavtest.obj
+OPTION        MAP=..\build\WAVTEST.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'A.26 Path B spike: waveOut -> VIS DAC test'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096
+LIBRARY       mmsystem.lib
+EXPORT        WavTestWndProc
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
+IMPORT        DisplayDib     DISPDIB.DISPLAYDIB
+IMPORT        __A000H        KERNEL.__A000H

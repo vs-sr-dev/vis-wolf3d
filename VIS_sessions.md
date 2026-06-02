@@ -2725,11 +2725,302 @@ economy fix achieved its stated goal (deeper level progression). Recon-first
   build/WOLFA25.EXE (282,792 B), build/wolfvis_a{24,25}.iso (~1.58 MB).
 - Two milestones (A.24 perf + A.25 ammo drops), batched for one push.
 
+### Push + rename (done at S20 close)
+
+- Pre-push sanity check: `.gitignore` already excludes build/, cd_root_*/,
+  *.exe, *.err, *.obj, wolf3d/, assets/, tools/OW/ — commit scope was exactly
+  10 files (2 src .c + 3+3 build infra + README + sessions log). No host
+  absolute paths in any functional file (build .bat use `%~dp0`, mkiso .py
+  use `__file__`, the only `A:\` paths are the VIS emulated-CD drive). The
+  `d:\Homebrew4\VIS` strings in this log are historical prose only — left
+  as-is by user call (non-functional, non-sensitive).
+- Optional tidy: README H1 "VIS Homebrew" → "VIS — Wolfenstein 3D" for
+  repo-name parity.
+- Commit `f9ee816` "S20: A.24 flush perf + A.25 guard ammo drops" pushed to
+  main. Repo renamed `vs-sr-dev/vis-homebrew` → `vs-sr-dev/vis-wolf3d` via
+  `gh repo rename` (local remote updated; GitHub auto-redirects the old URL).
+  Naming convention now `[console]-[project]`.
+
 ### Next-step candidates for S21
 
-- Push the A.24+A.25 batch + execute the deferred repo rename to
-  `vis-wolf3d`.
 - If more FPS is wanted: re-surface `g_last_render_ms` telemetry to MEASURE
   whether render / flush / AI-tick dominates, then target the real
   bottleneck (e.g. throttle AdvanceEnemies LOS DDA to every other tick).
 - Carried from S18: door SFX, L1 elevator/level-end, light-by-distance.
+- **Digi voices via VIS DAC (A.26) — recon DONE, see next section.**
+
+---
+
+## RECON — Digitized voices via the VIS PCM DAC (foundation for A.26)
+
+> **→ CONSUMED & SHIPPED in Session 21 (below).** Path B (waveOut) was
+> falsified (no MMSYSTEM wave device); Path A (raw DMA ch7) shipped. See the
+> S21 entry for what actually happened vs this plan.
+
+User question at S20 close: can we "creatively map" Wolf3D's incompatible
+Sound-Blaster digi tracks onto the VIS synth/hardware to sound nicer, as an
+explicit hardware-tied enhancement (exception to vanilla-faithfulness OK)?
+Answer after full recon: **YES, feasible.** This section is the complete
+foundation so a fresh session can build A.26 without re-deriving anything.
+
+### Why the digi voices don't play today
+
+Wolf3D ships every SFX in 3 forms (AUDIOWL1.H): PC speaker, AdLib FM
+(chunks 69..137 — what A.23 uses), and **digitized PCM** (the SB voices:
+"Halt!", death screams, "Schutzstaffel!", etc.). The digi path used the
+**Sound Blaster's DAC**. Id's vanilla driver writes SB DSP registers the VIS
+doesn't have — the VIS DAC is **Tandy-custom**, not SB-compatible. So the
+AdLib FM fallback plays instead (buzzy, per the now-corrected
+`reference_adlib_voice_expectation` memo).
+
+### Hard fact #1 — the VIS DAC is real, and DMA-fed only (verified in vis.cpp)
+
+`vis_audio_device` ("vis_pcm") in
+`tools/mame-src/src/mame/trs/vis.cpp` (and the Pippin copy): an ISA device
+with a **16-bit stereo R-2R DAC** (dual ldac/rdac), at I/O 0x0220-0x022f,
+**DMA channel 7**. Confirmed emulated.
+
+CRITICAL: samples arrive ONLY via `dack16_w()` (the DMA acknowledge handler).
+The port-write handler `pcm_w()` (0x220-0x22f) sets mode/count/ctrl/index but
+NEVER accepts sample data. **There is NO PIO sample-feed path — DMA ch7
+programming is mandatory.**
+
+Register map (base 0x220), from `pcm_w`/`pcm_r`/`pcm_update`:
+- `+0x00` MODE (rw): bit4 0x10 = ENABLE/start (edge-triggered: starts the
+  timer + asserts DRQ7 when set & changed; clearing stops). bit3 0x08 = 16-bit.
+  bit7 0x80 = mono. bits5-6 = rate divisor. `mode & 0x88` selects:
+  0x80=8-bit mono, 0x00=8-bit stereo, 0x88=16-bit mono, 0x08=16-bit stereo.
+  Reading +0x00 clears IRQ7 + the done flag.
+- `+0x09` CTRL (rw): bit1 0x02 = IRQ7-on-completion enable. bit2 0x04 = done
+  flag (set when curcount>=count; cleared by reading +0x00 or +0x09).
+- `+0x0c` / `+0x0e` COUNT lo/hi: number of samples for the transfer.
+- `+0x02`/`+0x03` and `+0x04`/`+0x05`: indexed register files (m_data[2][16],
+  "volume?" per source comment — likely L/R vol/filter; default 0, set for
+  full volume during the build session).
+- 8-bit mono mode unpacks TWO samples per 16-bit DMA word
+  (`m_sample[byte>>1] >> ((byte&1)*8)`), so 8-bit digi packs 2 bytes/word.
+- Rate: emu uses `attotime::from_ticks(1 << ((mode>>5)&3), 44100)` with an
+  explicit **"TODO: Unknown clock"** — so the real base clock is unconfirmed.
+  Selectable rates ≈ 44100 / 2^div = 44100/22050/11025/5512. **None is 7000**
+  → pitch caveat (see below).
+
+### Hard fact #2 — Wolf3D digi format + Id's DMA template
+
+(from `wolf3d/WOLFSRC/ID_SD.C`, `ID_PM.C`, `WL_MAIN.C`)
+- Digi = **8-bit UNSIGNED PCM, 7000 Hz, no per-sound header**. Rate set by SB
+  DSP time-constant `256 - (1000000/7000)` = 113 (ID_SD.C ~565).
+- PCM lives in the **VSWAP sound pages** (after walls+sprites). The LAST VSWAP
+  chunk (ChunksInFile-1) is the **DigiList**: 2 words per sound =
+  (page offset from PMSoundStart, length in bytes). `SD_PlayDigitized` reads
+  `DigiList[which*2+0]`=page, `[*+1]`=length, then streams 4 KB pages.
+- `wolfdigimap[]` (WL_MAIN.C ~849) maps sound enum → digi index. Combat voices:
+  HALTSND→digi 0, DEATHSCREAM1→12, DEATHSCREAM2/3→13, NAZIFIRESND→21,
+  SCHUTZADSND→7, TAKEDAMAGESND→14.
+- **Id's `SDL_SBPlaySeg` (ID_SD.C ~295-338) is the DMA-programming template**:
+  mask channel (0x0a), clear flip-flop (0x0c), set mode 0x49 (single,
+  mem→peripheral), write addr LSB/MSB + page reg + count LSB/MSB, unmask, then
+  SB DSP cmd 0x14 + length. We adapt this from 8-bit DMA ch1 → 16-bit DMA ch7
+  (different ports: 0xC0-0xDF range, word-addressed, page reg 0x8A, 128 KB
+  boundary), and replace the SB DSP trigger with the VIS DAC mode/count/ctrl
+  writes above.
+
+### Hard fact #3 — Win16 DMA toolkit is all present (verified in OW headers)
+
+- `GetSelectorBase(UINT)` — KERNEL, `tools/OW/h/win/win16.h:785`. Selector→
+  linear base = **physical address** on the 286 (standard mode, no paging).
+- `GlobalDosAlloc(DWORD)` (win16.h:789) — fixed <1 MB block for ISA DMA.
+  Also `GlobalAlloc(GMEM_FIXED|GMEM_NOT_BANKED)` + `GlobalPageLock`/`GlobalFix`.
+- `inp/outp/inpw/outpw` — `tools/OW/h/conio.h` (intrinsics). Already used for
+  OPL3 0x388.
+- **VDS (Virtual DMA Services) ABSENT** from the SDK — correct and expected:
+  it's a 386-enhanced-mode feature; the 286 needs linear==physical, which we
+  have. No blocker.
+
+### THE STRATEGY-CHANGING FIND — try Path B (waveOut) FIRST
+
+The Modular Windows SDK **exposes MMSYSTEM waveform audio**: `waveOutOpen`,
+`waveOutWrite`, `waveOutPrepareHeader` with `PCMWAVEFORMAT`
+(`tools/OW/h/win/mmsystem.h`). The Programmer's Reference states *"VIS players
+have an audio mixer for the compact-disc, waveform, and MIDI synthesizer."*
+If the VIS `sound.drv` implements `waveOut` against the 0x220 DAC (likely — it
+IS the VIS's native sound hardware), then a digi voice = `waveOutOpen` (request
+7000 Hz / 8-bit / mono, let the driver clock/resample) + `waveOutWrite(buf)`,
+with **zero DMA programming** and stereo positioning via `nChannels=2`.
+
+- **Path B test = a ~20-line spike app** (waveOutOpen + a single waveOutWrite
+  of a known PCM buffer; does sound come out in MAME-VIS?). If YES → the whole
+  feature is trivial. If NO (driver is a stub / not wired to the DAC) → fall
+  back to Path A.
+- Yellow flag: `reference_mmsystem_vis_half_rate` found `timeGetTime`/
+  `timeBeginPeriod` misbehave on VIS — but that's the TIMER side of MMSYSTEM,
+  not necessarily `waveOut`. Verify empirically.
+- **Path A (raw DMA) is the known-feasible fallback** — full register map +
+  Id's template above; poll CTRL bit2 for completion (no ISR needed — fits the
+  existing PIT-serviced model; avoids Win16 interrupt-vector hooking).
+
+### Integration (both paths)
+
+- Reuse the `ServiceSfx` PIT-accumulator skeleton + single-active-sound model.
+- `LoadVSwap` already parses `sound_start_idx` + `pageoffs[]`/`pagelens[]` for
+  ALL chunks; sound chunks are currently SKIPPED but trivially loadable
+  (`_llseek(pageoffs[idx])` + `_lread(pagelens[idx])`). Add a DigiList parse
+  (last chunk) + map digi# → VSWAP sound chunk.
+- Swap only the 3 voice-class triggers (HALT on WALK→SHOOT, DEATHSCREAM on
+  lethal DamageEnemy, NAZIFIRE on ShootPlayer) from AdLib FM → digi PCM; keep
+  AdLib for pistol/pickup/damage chimes. Stereo pan by enemy world-direction =
+  the "hardware enhancement" the user wants (vanilla digi was mono).
+
+### Open questions to resolve IN the build session
+
+1. Does VIS `waveOut` actually emit to the DAC in MAME-VIS? (Path B spike.)
+2. Real DAC clock base (emu "TODO: unknown clock", assumes 44100). Affects
+   pitch; 7000 Hz digi has no exact native rate → resample to 11025/5512 or
+   accept pitch shift. Calibrate empirically.
+3. Exact DigiList page → VSWAP chunk-index mapping (PMSoundStart vs our
+   `sound_start_idx`).
+4. 16-bit DMA ch7 port specifics (page reg 0x8A, word addressing, 128 KB
+   boundary) if Path A.
+
+### Recommended A.26 session shape
+
+1. Path B spike (cheap). If it sounds → load digi (DigiList) + swap 3 triggers
+   + optional stereo pan → ship A.26.
+2. Else Path A: digi loader + DAC/DMA-ch7 driver (GlobalDosAlloc buffer →
+   GetSelectorBase phys addr → program 8237 ch7 + DAC regs → poll done) + swap
+   3 triggers + stereo via 8-bit-stereo interleave → ship A.26.
+
+No inflated estimate per the pacing memo — it's one focused build session,
+Path-B-first. Recon-first streak preserved (full hot-path + cross-source map
+before any code).
+
+## Session 21 — 2026-06-02 — Milestone A.26 SHIPPED: digitized voices via the VIS DAC + level BGM re-enabled
+
+The "audio bello" session. Goal: prove (then ship) real digitized voice
+playback on the VIS custom DAC, consuming the S20 recon above. Ended up
+delivering a complete 3-channel in-game audio mix.
+
+### Path B (waveOut) — falsified at the cheapest level
+
+Built a ~20-line spike (`src/wavtest.c`, WAVTEST.EXE) per the recon's
+"try Path B first" plan: `waveOutOpen(11025/8/mono) + waveOutWrite` of a
+synthesized 440 Hz square tone, with 4 on-screen diagnostic bands encoding
+each MMSYSTEM return code as readable bit-cells. Result: **silent**, and the
+bands showed `waveOutGetNumDevs() == 0`. Even though `SYSTEM.INI` lists
+`drivers=mmsystem.dll` + `sound.drv=sound.drv`, the VIS sound.drv registers
+**no waveform output device** with MMSYSTEM. Path B is dead at the device
+level — falsified in one cheap spike, zero ambiguity. The DAC is reachable
+only via DMA.
+
+### Path A (raw DMA ch7) — confirmed end-to-end
+
+Before writing the driver, read the emulator source to nail the exact
+programming contract (no guessing):
+- `vis.cpp` `vis_audio_device` (`pcm_w`/`dack16_w`/`pcm_update`): DAC at
+  0x220-0x22f, DMA ch7. Mode +0x00 (bit4 enable edge-trigger, bit3 16-bit,
+  bit7 mono, bits5-6 rate divisor → 44100/2^div). Count +0x0c/+0x0e = number
+  of DMA **words** (8-bit mono packs 2 samples/word). Done flag = CTRL +0x09
+  bit2 (read clears). Start = write MODE with bit4 set AND changed from prior.
+- `at.cpp` `dma_read_word` (line ~304): 16-bit DMA byte address =
+  `((page<<16) & 0xfe0000) | (wordaddr << 1)` — the 8237 address register
+  holds a WORD address (phys>>1), page reg 0x8A holds A17..A23, bit16 masked.
+  Verified port 0x8A maps to ch7's 16-bit page slot (`m_dma_offset[1][3]`).
+- DMA2 ports (0xC0-0xDF, spaced ×2): ch7 addr 0xCC, count 0xCE, single-mask
+  0xD4, mode 0xD6, clear-ff 0xD8. Mode 0x4B = single|read(mem→dev)|ch3.
+
+Spike `src/wavtsta.c` (WAVTSTA.EXE): `GlobalDosAlloc` a conventional buffer,
+fill with the same tone, program the 8237 + DAC (mode 0xD0 = 8-bit mono @
+11025), poll CTRL bit2. **Tone played from the DAC.** All diagnostic bands
+green; the word-count band read 0x2000 confirming the address math. The
+"unknown clock" TODO in the emu (assumes 44100 base) sounds correct at the
+÷4 divisor. Headline structural unknown CLOSED: **digitized audio on VIS is
+real.**
+
+### Integration into wolfvis (the A.26 milestone)
+
+Baseline `wolfvis_a25.c` → `wolfvis_a26.c`. Offline-parsed `VSWAP.WL1` in
+Python first to confirm the loader logic without an emulator round-trip:
+663 chunks, sound_start=542, DigiList at chunk 662 (46 digis). Digi indices
+confirmed from the cloned Wolf3D source `wolfdigimap[]` (WL1 = shareware =
+`!SPEAR` + `UPLOAD` branch): HALT=0 (5996 B), DEATHSCREAM1=12 (2850 B),
+NAZIFIRE=21 (8815 B). All present, all valid — no "FACE1APIC empirical" trap
+this time.
+
+Engine added:
+- `LoadDigisFromVSwap(f)` — parses the DigiList (last chunk, 2 words/sound =
+  page, byte-length) and loads the 3 voice digis into `digi_raw[3][]`,
+  reusing the already-open VSWAP handle + parsed pageoffs/pagelens. Called at
+  the end of `LoadVSwap`, best-effort (never fails the VSWAP load).
+- `DacDmaInit()` — allocates the conventional DMA playback buffer (see memory
+  trap below).
+- `PlayDigi(slot)` — resamples the stored 7000-Hz digi to the DAC rate into
+  the DMA buffer, programs 8237 ch7 + DAC, fire-and-forget (the emulated DAC
+  streams the whole buffer autonomously once armed). `PollDigiDone()` clears
+  the playing flag on CTRL bit2.
+- Three voice triggers swapped AdLib-FM → digi PCM: HALT (WALK→SHOOT),
+  DEATHSCREAM (lethal DamageEnemy), NAZIFIRE (ShootPlayer). The other 5 SFX
+  stay on OPL3 ch0. Digi = DAC, SFX = OPL3 ch0, music = OPL3 ch1..8 — three
+  independent channels, no conflict.
+
+### Trap S21.1 — GlobalDosAlloc starved in the big app (silent digi)
+
+First in-game run: digi silent, AdLib SFX fine. HUD-panel diagnostic hijack
+(per `reference_hud_diagnostic_rescue`) showed digis loaded correctly
+(lengths/num_digi right) but `g_dac_ready == 0` → **GlobalDosAlloc failed**.
+The spike (3 KB app) got its buffer; wolfvis (320 KB EXE + ~673 KB FAR_DATA,
+dominated by `sprites[78][4096]`=312 KB + walls 128 KB) starves the <1 MB
+DOS arena GlobalDosAlloc draws from. Fixes:
+1. Dropped the wasteful 2×-over-allocation for 128KB-boundary safety; instead
+   allocate `req` and use the **largest sub-window that doesn't cross a 128KB
+   boundary** (an un-crossed block is fully usable; expected ≈ req).
+2. **Size ladder**: try descending request sizes, keep the largest granted.
+3. **Adaptive rate**: pick 11025 (mode 0xD0) if the window fits the longest
+   digi resampled, else 5512 (mode 0xF0).
+Result: window jumped 4096 → after freeing conventional (HEAPSIZE 8192→2048,
+STACK 8192→6144, `MAX_DIGI_RAW` 12000→9216) → **16384**, which fits all 3
+voices at full-length 11025 mono (NAZI 13884 < 16384). So the memory hunt
+*improved* fidelity (11025, untruncated) over the first working build (5512,
+truncated). Voices user-confirmed: "vittoria, voci e spari giusti".
+
+### Pivot (user call) — level BGM > stereo voices
+
+With digi shipped, the planned next step was A.26.1 stereo pan ("Halt!" from
+the left). User asked the sharp product question: isn't the *missing level
+music* worth more than a stereo bonus on a working system? Key clarification:
+**the BGM is IMF/FM (OPL3), not PCM** — it never touches the DMA buffer, so
+the 16384 constraint is irrelevant to it. Found the music engine (A.10/A.11:
+LoadMusicChunk, ServiceMusic, StartMusic) fully built but **`StartMusic()`
+never called** — music was deliberately parked during the raycaster-heavy
+milestones to save per-frame cost (the "sqActive=FALSE = zero per-frame cost"
+comments). Wired `StartMusic()` into WinMain after OplInit.
+
+### Trap S21.2 — music drags when moving (twin of the A.23.2 SFX trap)
+
+Music played in tempo when standing still but **dragged badly while moving**.
+Cause: `ServiceMusic` had a hidden accumulator cap —
+`if (alTimeCount > sqHackTime + 4) alTimeCount = sqHackTime;` — that DISCARDS
+real elapsed time whenever playback falls >4 ticks behind, which is exactly
+what a movement render pass (no music service during DrawViewport) causes.
+Identical in spirit to the A.23.2 SFX underplay trap. Fix (twin of A.23.1/2):
+**remove the cap** (let the while-loop catch up) + add `ServiceAudio()` (music
++ SFX in one call) **sprinkled across the render path** at the same sites as
+the old ServiceSfx calls (DrawViewport column loop every 16 cols, after
+sprites, after weapon, and 4× through WM_TIMER) so the gap never grows large
+enough to burst. User: "decisamente meglio, la musica tiene il tempo!"
+
+### Result
+
+`wolfvis_a26.c` is the new baseline. Complete in-game audio: BGM (OPL3 FM) +
+digitized voices (DAC/DMA ch7) + AdLib SFX (OPL3 ch0), simultaneous, perf
+holds. Spikes `wavtest.c`/`wavtsta.c` kept as the documented Path-B-falsified
+/ Path-A-proven foundation. Recon-first preserved (emulator source read before
+the driver; VSWAP parsed offline before the loader).
+
+### Deferred
+
+- **A.26.1 stereo pan** — feasible at 5512-Hz 8-bit-stereo (mode 0x70, L=low
+  byte / R=high byte per word) within the 16384 window (NAZI stereo 13884 B
+  fits). Costs voice fidelity (5512 vs 11025) and the L/R-by-enemy-direction
+  pan math (reuse the SpriteWorld view transform / `SIN_Q15`/`COS_Q15` +
+  g_px/g_py/g_pa). Polish, not core — parked by user preference.
+- BGM tempo is "un filo veloce" standing still (PIT_CYCLES_PER_IMF_TICK=852,
+  the empirical S6 value) — minor, acceptable; revisit only if it grates.
